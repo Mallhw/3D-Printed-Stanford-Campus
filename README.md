@@ -17,10 +17,15 @@ The map is a thin white shell over 32x32 LEDs. Walls underneath keep each LED's 
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python build_terrain.py                  # terrain from USGS + OpenStreetMap
+.venv/bin/python build_terrain.py --layers         # same, plus roads, water and lawns
 .venv/bin/python -I convert_3mf.py model.3mf       # or convert a Mini Skyline model
 ```
 
 Printable tiles are written to `~/Documents/stanford-lightmap`.
+
+`--layers` gives a Maps3D-style map: roads stand 0.4 mm up, lawns 0.2 mm up, and water sits 0.6 mm down.
+
+![Roads, water and lawns](docs/layers_preview.png)
 
 ## Credits
 
