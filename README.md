@@ -33,6 +33,16 @@ Print `test_coupon.stl` first. It has four cells with 0.6, 0.8, 1.0 and 1.4 mm s
 
 All the knobs (map centre, size, exaggeration, wall and skin thickness) are constants at the top of `build_terrain.py`.
 
+## Converting a Mini Skyline model
+
+`convert_3mf.py` takes a solid model exported from miniskyline.com and rebuilds it as hollow LED tiles: same top surface, 1 mm skin, same wall grid.
+
+```sh
+.venv/bin/python -I convert_3mf.py ~/Downloads/stanford-university.3mf
+```
+
+Tiles land in `~/Documents/stanford-lightmap/miniskyline`. The source model is not in this repo.
+
 ## Data credits
 
 - Elevation: U.S. Geological Survey 3D Elevation Program.
