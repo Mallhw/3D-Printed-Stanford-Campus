@@ -8,10 +8,14 @@ pitch. The walls do two jobs: they support the skin while printing (no
 supports needed) and they stop one LED's light leaking into the next cell.
 
 Run:  .venv/bin/python build_terrain.py
+      .venv/bin/python build_terrain.py --sample 180 110 60
+      (a 60 mm test piece whose south-west corner is 180 mm east and
+       110 mm north of the map's south-west corner)
 """
 
 import json
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -79,14 +83,14 @@ def fetch_dem(bbox):
 
 
 def fetch_buildings(bbox):
-    path = CACHE / f"buildings_{AREA}.json"
+    path = CACHE / f"buildings_v2_{AREA}.json"
     if not path.exists():
         to_ll = Transformer.from_crs("EPSG:26910", "EPSG:4326", always_xy=True)
         w, s = to_ll.transform(bbox[0], bbox[1])
         e, n = to_ll.transform(bbox[2], bbox[3])
         box = f"({s - 0.001:.5f},{w - 0.001:.5f},{n + 0.001:.5f},{e + 0.001:.5f})"
         q = (f'[out:json][timeout:120];(way["building"]{box};'
-             f'relation["building"]{box};);out geom tags;')
+             f'relation["building"]{box};);out geom;')
         r = requests.post("https://overpass-api.de/api/interpreter",
                           data={"data": q}, headers=UA, timeout=180)
         r.raise_for_status()
@@ -98,7 +102,9 @@ def fetch_buildings(bbox):
 def building_height_m(tags):
     for key, mult in (("height", 1.0), ("building:levels", 3.5)):
         try:
-            return max(MIN_BUILDING_M, float(str(tags[key]).split()[0]) * mult)
+            h = float(str(tags[key]).split()[0]) * mult
+            if h > 0:   # some buildings are tagged height=0 (e.g. the Stadium)
+                return max(MIN_BUILDING_M, h)
         except (KeyError, ValueError, IndexError):
             pass
     return DEFAULT_BUILDING_M
@@ -128,9 +134,12 @@ def height_grid(bbox):
         bid = len(heights)
         if el["type"] == "relation":
             parts = [m for m in el.get("members", []) if len(m.get("geometry", [])) >= 3]
-            for role, fill in (("outer", bid), ("inner", 0)):
+            if not parts:
+                continue
+            # anything not marked "inner" (a courtyard hole) counts as building
+            for inner, fill in ((False, bid), (True, 0)):
                 for m in parts:
-                    if m.get("role") == role:
+                    if (m.get("role") == "inner") == inner:
                         draw.polygon(ring(m["geometry"]), fill=fill)
         elif len(el.get("geometry", [])) >= 3:
             draw.polygon(ring(el["geometry"]), fill=bid)
@@ -228,6 +237,10 @@ def main():
     top = CAVITY_MM + SKIN_MM + (elev - floor_m) * Z_EXAG * 1000.0 / SCALE
     bottom = underside(top)
 
+    if len(sys.argv) == 5 and sys.argv[1] == "--sample":
+        write_sample(top, bottom, *(float(a) for a in sys.argv[2:5]))
+        return
+
     cells = round(TILE_MM / GRID_MM)             # 400
     w = wall_mask(cells)
     walls = w[:, None] | w[None, :]
@@ -273,6 +286,27 @@ def main():
     for name, nf, zmax, vol in report:
         # 1.24 g/cm3 is PLA density
         print(f"{name}: {nf} triangles, {zmax:.1f} mm tall, {vol:.0f} cm3 = {vol * 1.24:.0f} g PLA")
+
+
+def write_sample(top, bottom, x_mm, y_mm, size_mm):
+    """Cut a small square out of the full model as a quick test print."""
+    n = round(size_mm / GRID_MM)
+    c0 = round(x_mm / GRID_MM)
+    r0 = round((MODEL_MM - y_mm - size_mm) / GRID_MM)   # row 0 is north
+    sl = np.s_[r0: r0 + n + 1, c0: c0 + n + 1]
+    # drop the piece so its lowest ground sits just above the LED gap;
+    # otherwise the sample prints millimetres of wall it does not need
+    drop = top[sl].min() - (CAVITY_MM + SKIN_MM)
+    t = top[sl] - drop
+    w = wall_mask(n)
+    b = np.where(w[:, None] | w[None, :], 0.0, bottom[sl] - drop)
+    verts, faces = solid_between(t, b)
+    assert check_watertight(faces), "sample is not watertight"
+    assert (t - b).min() > 0.5, "skin collapsed somewhere"
+    write_stl(OUT / "sample.stl", verts, faces)
+    vol = volume_cm3(verts, faces)
+    print(f"sample.stl: {size_mm:.0f} mm square, {t.max():.1f} mm tall, "
+          f"{vol:.1f} cm3 = {vol * 1.24:.0f} g PLA")
 
 
 def latlon_to_led(lat, lon, meta):
