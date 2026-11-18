@@ -8,6 +8,9 @@ pitch. The walls do two jobs: they support the skin while printing (no
 supports needed) and they stop one LED's light leaking into the next cell.
 
 Run:  .venv/bin/python build_terrain.py
+      .venv/bin/python build_terrain.py --layers
+      (Maps3D-style: adds roads, sunken water and raised green areas, uses
+       the area picked in the Maps3D editor, writes to a maps3d-style folder)
       .venv/bin/python build_terrain.py --sample 180 110 60
       (a 60 mm test piece whose south-west corner is 180 mm east and
        110 mm north of the map's south-west corner)
@@ -42,6 +45,28 @@ MIN_BUILDING_M = 5.0
 HERE = Path(__file__).parent
 CACHE = HERE / "data"                       # downloaded source data (gitignored)
 OUT = Path.home() / "Documents" / "stanford-lightmap"   # durable outputs
+
+# ---- Maps3D-style layers (--layers). Heights are whole 0.2 mm print layers,
+# because anything smaller than one layer cannot be printed.
+# The flag is read here, not in main(), so preview.py sees the same settings
+# when it imports this file.
+LAYERS = "--layers" in sys.argv
+if LAYERS:
+    sys.argv.remove("--layers")             # leaves --sample's arguments in place
+    # middle of the box drawn in the Maps3D editor (37.4189..37.43793 N,
+    # 122.18218..122.15884 W); it fits inside the same 2.16 km square
+    CENTER_LAT, CENTER_LON = 37.42842, -122.17051
+    OUT = OUT / "maps3d-style"
+GREEN_MM = 0.2           # lawns, parks, woods: one layer up
+ROAD_MM = 0.4            # roads: two layers up, so they sit above the lawns
+WATER_MM = -0.6          # water: three layers down ("inlaid" in Maps3D)
+MIN_ROAD_MM = 0.8        # narrowest printable ridge = two nozzle widths
+ROAD_WIDTH_M = {         # real-world widths by OpenStreetMap road type
+    "motorway": 16, "trunk": 16, "primary": 14, "secondary": 12, "tertiary": 10,
+    "residential": 8, "unclassified": 8, "living_street": 8,
+    "pedestrian": 6, "service": 5,
+}
+GROUND, GREEN, WATER, ROAD, BUILDING = range(5)   # ids in the class grid
 
 TILE_MM = LEDS_PER_PANEL * LED_PITCH_MM     # 160
 MODEL_MM = PANELS * TILE_MM                 # 320
@@ -82,6 +107,26 @@ def fetch_dem(bbox):
     return tifffile.imread(path).astype(np.float64)
 
 
+OVERPASS = (     # public OpenStreetMap query servers; any one of them will do
+    "https://overpass-api.de/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
+
+
+def overpass(query):
+    """Run an OpenStreetMap query; the free servers are often busy, so try each."""
+    for url in OVERPASS:
+        try:
+            r = requests.post(url, data={"data": query}, headers=UA, timeout=90)
+        except requests.RequestException:
+            continue
+        if r.ok and r.text.lstrip().startswith("{"):   # busy servers send an error page
+            return r.text
+    raise SystemExit("OpenStreetMap servers are busy; run again in a minute")
+
+
 def fetch_buildings(bbox):
     path = CACHE / f"buildings_v2_{AREA}.json"
     if not path.exists():
@@ -91,11 +136,36 @@ def fetch_buildings(bbox):
         box = f"({s - 0.001:.5f},{w - 0.001:.5f},{n + 0.001:.5f},{e + 0.001:.5f})"
         q = (f'[out:json][timeout:120];(way["building"]{box};'
              f'relation["building"]{box};);out geom;')
-        r = requests.post("https://overpass-api.de/api/interpreter",
-                          data={"data": q}, headers=UA, timeout=180)
-        r.raise_for_status()
-        path.write_text(r.text)
+        path.write_text(overpass(q))
     return json.loads(path.read_text())["elements"]
+
+
+def fetch_layers(bbox):
+    """Roads, water and green areas from OpenStreetMap."""
+    path = CACHE / f"layers_{AREA}.json"
+    if not path.exists():
+        to_ll = Transformer.from_crs("EPSG:26910", "EPSG:4326", always_xy=True)
+        w, s = to_ll.transform(bbox[0], bbox[1])
+        e, n = to_ll.transform(bbox[2], bbox[3])
+        box = f"({s - 0.001:.5f},{w - 0.001:.5f},{n + 0.001:.5f},{e + 0.001:.5f})"
+        areas = ('["natural"~"^(water|wood|grassland|scrub)$"]',
+                 '["leisure"~"^(park|pitch|garden|golf_course|swimming_pool)$"]',
+                 '["landuse"~"^(grass|meadow|forest|recreation_ground|village_green)$"]')
+        parts = [f'way["highway"]{box};']
+        parts += [f"{kind}{sel}{box};" for sel in areas for kind in ("way", "relation")]
+        q = f'[out:json][timeout:120];({"".join(parts)});out geom;'
+        path.write_text(overpass(q))
+    return json.loads(path.read_text())["elements"]
+
+
+def area_class(tags):
+    if tags.get("natural") == "water" or tags.get("leisure") == "swimming_pool":
+        return WATER
+    if "highway" in tags:
+        return None                      # roads are drawn as lines, not areas
+    if tags.get("natural") or tags.get("leisure") or tags.get("landuse"):
+        return GREEN
+    return None
 
 
 # ---------------------------------------------------------------- heights
@@ -111,7 +181,10 @@ def building_height_m(tags):
 
 
 def height_grid(bbox):
-    """Elevation in metres at every mesh vertex, with buildings added."""
+    """Elevation in metres at every mesh vertex, with buildings added.
+
+    Also returns the layer relief in mm and a grid saying what each vertex is.
+    """
     xmin, ymin, xmax, ymax = bbox
     dem = ndimage.gaussian_filter(fetch_dem(bbox), 1.5)  # remove lidar noise
     # sample the 1600 px DEM at the (N+1) vertex positions
@@ -127,34 +200,82 @@ def height_grid(bbox):
         xs, ys = TO_UTM.transform([p["lon"] for p in geom], [p["lat"] for p in geom])
         return [((x - xmin) / dx, (ymax - y) / dx) for x, y in zip(xs, ys)]
 
+    def paint(draw, el, fill):
+        """Fill one OSM area on a drawing; False if it has no usable outline."""
+        if el["type"] == "relation":
+            parts = [m for m in el.get("members", []) if len(m.get("geometry", [])) >= 3]
+            # anything not marked "inner" (a hole) counts as part of the area
+            for inner, value in ((False, fill), (True, 0)):
+                for m in parts:
+                    if (m.get("role") == "inner") == inner:
+                        draw.polygon(ring(m["geometry"]), fill=value)
+            return bool(parts)
+        if len(el.get("geometry", [])) >= 3:
+            draw.polygon(ring(el["geometry"]), fill=fill)
+            return True
+        return False
+
+    relief = np.zeros((N + 1, N + 1))            # mm added on top of the ground
+    classes = np.zeros((N + 1, N + 1), np.uint8)
+    if LAYERS:
+        layers = sorted(fetch_layers(bbox), key=lambda e: e["type"] != "relation")
+        green_img = Image.new("L", (N + 1, N + 1), 0)
+        water_img = Image.new("I", (N + 1, N + 1), 0)     # one id per lake/pool
+        n_water = 0
+        for el in layers:
+            kind = area_class(el.get("tags", {}))
+            if kind == GREEN:
+                paint(ImageDraw.Draw(green_img), el, 1)
+            elif kind == WATER and paint(ImageDraw.Draw(water_img), el, n_water + 1):
+                n_water += 1
+        classes[np.array(green_img) > 0] = GREEN
+        relief[classes == GREEN] = GREEN_MM
+        wlab = np.array(water_img)
+        wids = np.unique(wlab)
+        wids = wids[wids > 0]
+        if len(wids):
+            # water is flat: level each lake at the average height of its bed
+            level = np.zeros(n_water + 1)
+            level[wids] = ndimage.mean(ground, wlab, wids)
+            ground = np.where(wlab > 0, level[wlab], ground)
+            classes[wlab > 0] = WATER
+            relief[wlab > 0] = WATER_MM
+        # roads: draw 1-pixel centre lines, then widen each road type by
+        # measuring distance to the line (gives round corners and exact widths)
+        for width_m in sorted(set(ROAD_WIDTH_M.values())):
+            img = Image.new("L", (N + 1, N + 1), 0)
+            d = ImageDraw.Draw(img)
+            for el in layers:
+                t = el.get("tags", {})
+                kind = t.get("highway", "").removesuffix("_link")
+                if (el["type"] != "way" or ROAD_WIDTH_M.get(kind) != width_m
+                        or t.get("tunnel") == "yes" or t.get("area") == "yes"
+                        or t.get("service") in ("parking_aisle", "driveway")):
+                    continue
+                d.line(ring(el["geometry"]), fill=1)
+            half = max(width_m / dx, MIN_ROAD_MM / GRID_MM) / 2     # in cells
+            road = ndimage.distance_transform_edt(np.array(img) == 0) <= half
+            classes[road] = ROAD
+            relief[road] = ROAD_MM
+
     heights = [0.0]
     elements = fetch_buildings(bbox)
     # relations first: their courtyard holes must not erase stand-alone buildings
     for el in sorted(elements, key=lambda e: e["type"] != "relation"):
-        bid = len(heights)
-        if el["type"] == "relation":
-            parts = [m for m in el.get("members", []) if len(m.get("geometry", [])) >= 3]
-            if not parts:
-                continue
-            # anything not marked "inner" (a courtyard hole) counts as building
-            for inner, fill in ((False, bid), (True, 0)):
-                for m in parts:
-                    if (m.get("role") == "inner") == inner:
-                        draw.polygon(ring(m["geometry"]), fill=fill)
-        elif len(el.get("geometry", [])) >= 3:
-            draw.polygon(ring(el["geometry"]), fill=bid)
-        else:
-            continue
-        heights.append(building_height_m(el.get("tags", {})))
+        if paint(draw, el, len(heights)):
+            heights.append(building_height_m(el.get("tags", {})))
 
     lab = np.array(labels)
+    classes[lab > 0] = BUILDING
+    relief[lab > 0] = 0.0                        # buildings already stand proud
     ids = np.unique(lab)
     ids = ids[ids > 0]
     # flat roof = average ground under the footprint + building height
     base = ndimage.mean(ground, lab, ids)
     roof = np.zeros(len(heights))
     roof[ids] = base + np.array(heights)[ids]
-    return np.where(lab > 0, np.maximum(ground, roof[lab]), ground), ground, len(ids)
+    elev = np.where(lab > 0, np.maximum(ground, roof[lab]), ground)
+    return elev, ground, len(ids), relief, classes
 
 
 # ------------------------------------------------------------------- mesh
@@ -232,9 +353,10 @@ def main():
     CACHE.mkdir(exist_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
     bbox = bbox_utm()
-    elev, ground, n_buildings = height_grid(bbox)
+    elev, ground, n_buildings, relief, classes = height_grid(bbox)
     floor_m = ground.min()
-    top = CAVITY_MM + SKIN_MM + (elev - floor_m) * Z_EXAG * 1000.0 / SCALE
+    # the cavity is deep enough that sunken water still leaves room for light
+    top = CAVITY_MM + SKIN_MM + (elev - floor_m) * Z_EXAG * 1000.0 / SCALE + relief
     bottom = underside(top)
 
     if len(sys.argv) == 5 and sys.argv[1] == "--sample":
@@ -280,6 +402,7 @@ def main():
     }
     (OUT / "map.json").write_text(json.dumps(meta, indent=2))
     np.save(CACHE / "top_mm.npy", top)
+    np.save(CACHE / "classes.npy", classes)
 
     print(f"scale 1:{SCALE:.0f}, {n_buildings} buildings, "
           f"ground {ground.min():.0f}-{ground.max():.0f} m")
