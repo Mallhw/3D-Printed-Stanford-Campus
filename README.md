@@ -4,6 +4,19 @@ A 3D-printed terrain map of Stanford campus that sits on an LED matrix. Each LED
 
 ![Preview of the terrain](docs/preview.png)
 
+## View the models
+
+GitHub shows these in a 3D viewer you can spin around:
+
+| Model | Whole map (reduced detail) | 60 mm sample (print detail, flip it to see the LED cells) |
+|---|---|---|
+| Converted Mini Skyline model | [miniskyline_whole_map.stl](models/miniskyline_whole_map.stl) | [miniskyline_sample_60mm.stl](models/miniskyline_sample_60mm.stl) |
+| Terrain built from USGS + OpenStreetMap | [terrain_whole_map.stl](models/terrain_whole_map.stl) | [terrain_sample_60mm.stl](models/terrain_sample_60mm.stl) |
+
+![Converted Mini Skyline model](docs/miniskyline_preview.png)
+
+The whole-map files are for looking at only. The printable tiles are about 32 MB each and are built locally.
+
 ## Status
 
 - [x] Terrain tiles (this repo)
@@ -47,3 +60,4 @@ Tiles land in `~/Documents/stanford-lightmap/miniskyline`. The source model is n
 
 - Elevation: U.S. Geological Survey 3D Elevation Program.
 - Buildings: © OpenStreetMap contributors, ODbL.
+- Mini Skyline models: created with [Mini Skyline](https://miniskyline.com); full attribution in `models/MINISKYLINE_ATTRIBUTION.txt`.
