@@ -12,10 +12,10 @@ A 3D-printed terrain map of Stanford campus that sits on an LED matrix. Each LED
 
 ## The model
 
-- 3.84 km square at 1:12,000, from the Stadium down to the Dish.
-- Four 160 mm tiles. Each one sits on a 16x16 WS2812B panel (10 mm pitch), so the full map is 32x32 LEDs at 120 m per LED.
+- 2.16 km square at 1:6,750 covering core campus: hospital to Stadium in the north, Lake Lagunita in the south.
+- Four 160 mm tiles. Each one sits on a 16x16 WS2812B panel (10 mm pitch), so the full map is 32x32 LEDs at 67.5 m per LED.
 - Each tile is a 1 mm translucent skin held up by 0.8 mm walls on the LED pitch. The walls support the skin while printing and keep each LED's light in its own cell.
-- Height is exaggerated 2.5x because campus is nearly flat.
+- Height is exaggerated 2x because campus is nearly flat.
 - Elevation comes from USGS 3DEP lidar. Buildings come from OpenStreetMap.
 
 ## Build

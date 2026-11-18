@@ -22,13 +22,13 @@ from pyproj import Transformer
 from scipy import ndimage
 
 # ----------------------------------------------------------------- config
-CENTER_LAT, CENTER_LON = 37.4210, -122.1700  # midway between Stadium and Dish
-SPAN_M = 3840.0          # ground width of the square map (120 m per LED)
+CENTER_LAT, CENTER_LON = 37.4285, -122.1724  # centre of the Find My screenshot view
+SPAN_M = 2160.0          # ground width of the square map (67.5 m per LED)
 PANELS = 2               # 2x2 LED panels
 LEDS_PER_PANEL = 16
 LED_PITCH_MM = 10.0      # standard WS2812B 16x16 panel
 GRID_MM = 0.4            # mesh resolution = one nozzle width; finer cannot print
-Z_EXAG = 2.5             # campus is flat; exaggerate height so relief shows
+Z_EXAG = 2.0             # campus is flat; exaggerate height so relief shows
 SKIN_MM = 1.0            # translucent top thickness (5 layers at 0.2 mm)
 CAVITY_MM = 5.0          # min air gap above the LEDs so light spreads in a cell
 WALL_MM = 0.8            # baffle wall = two 0.4 mm perimeters
@@ -47,6 +47,8 @@ UA = {"User-Agent": "terrain-model-builder/1.0"}
 
 # UTM zone 10N: a flat metre grid, so the map is not stretched like raw lat/lon
 TO_UTM = Transformer.from_crs("EPSG:4326", "EPSG:26910", always_xy=True)
+# cache files are named after the map area, so changing the area refetches
+AREA = f"{CENTER_LAT}_{CENTER_LON}_{SPAN_M:.0f}"
 
 
 def bbox_utm():
@@ -58,7 +60,7 @@ def bbox_utm():
 # ------------------------------------------------------------------ fetch
 def fetch_dem(bbox):
     """Bare-earth elevation (metres) as a 1600x1600 array, row 0 = north."""
-    path = CACHE / "dem.tif"
+    path = CACHE / f"dem_{AREA}.tif"
     if not path.exists():
         r = requests.get(
             "https://elevation.nationalmap.gov/arcgis/rest/services/"
@@ -77,7 +79,7 @@ def fetch_dem(bbox):
 
 
 def fetch_buildings(bbox):
-    path = CACHE / "buildings.json"
+    path = CACHE / f"buildings_{AREA}.json"
     if not path.exists():
         to_ll = Transformer.from_crs("EPSG:26910", "EPSG:4326", always_xy=True)
         w, s = to_ll.transform(bbox[0], bbox[1])
