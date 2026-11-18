@@ -6,7 +6,9 @@ thick plastic stays dim, so the map is drawn in thickness:
     roads, water   0.6 mm   brightest
     open ground    0.8 mm
     woods          1.0 mm
-    buildings      0.8 mm + real building height   dimmest
+    buildings      raised to their real height, but hollow underneath, so
+                   the roof is still only 0.8 mm thick and a light under a
+                   building shines through as brightly as one in the open
 
 Run:  .venv/bin/python -I thin_map.py <folder with the .3mf and georeference.json>
 """
@@ -35,6 +37,8 @@ GRID = 0.3                 # mm between mesh points
 GROUND, ROAD, WATER, WOODS = 0.8, 0.6, 0.6, 1.0     # plate thickness in mm
 MAX_BUILDING = 8.0         # cap so Hoover Tower is not a fragile needle
 PANEL_PX, PANEL_PITCH = 64, 4.0                     # 64x64 matrix, 4 mm per pixel
+SKIN = 0.8                 # roof thickness over the hollow under each building
+RIB_PITCH = 8.0            # thin ribs under big roofs so they do not sag while printing
 SAMPLE_STEP = 0.09
 DEST = OUT / "thin"
 
@@ -101,13 +105,29 @@ def clean_outline(covered):
             part |= bad
 
 
-def plate_mesh(thickness, inside):
-    """Closed mesh: flat bottom at z=0, top at the given thickness, walls at the outline."""
+def hollow_under(top):
+    """Underside height: 0 on the ground, raised under buildings to leave a thin roof."""
+    yy, xx = np.mgrid[-2:3, -2:3]
+    disk = yy * yy + xx * xx <= 4
+    # erosion keeps the hollow 0.6 mm in from each wall so building walls stay solid
+    bottom = np.maximum(ndimage.grey_erosion(top, footprint=disk, mode="nearest") - SKIN, 0)
+    bottom[bottom < 0.4] = 0      # only hollow real buildings, not 0.2 mm bumps like woods
+    rows, cols = top.shape
+    # ribs sit on the lines between LED pixels, measured from the plate centre
+    x = np.arange(cols) * GRID - (cols - 1) * GRID / 2
+    y = np.arange(rows) * GRID - (rows - 1) * GRID / 2
+    on_rib = lambda v: np.abs((v + RIB_PITCH / 2) % RIB_PITCH - RIB_PITCH / 2) <= GRID
+    bottom[on_rib(y)[:, None] | on_rib(x)[None, :]] = 0
+    return bottom
+
+
+def plate_mesh(thickness, inside, bottom):
+    """Closed mesh between the underside and the top, with walls at the outline."""
     rows, cols = thickness.shape
     X, Y = np.meshgrid(np.arange(cols) * GRID, (rows - 1 - np.arange(rows)) * GRID)
     n = rows * cols
     verts = np.concatenate([np.stack([X, Y, thickness], -1).reshape(-1, 3),
-                            np.stack([X, Y, np.zeros_like(X)], -1).reshape(-1, 3)])
+                            np.stack([X, Y, bottom], -1).reshape(-1, 3)])
     vid = np.arange(n).reshape(rows, cols)
     a, b, d, e = vid[:-1, :-1], vid[:-1, 1:], vid[1:, :-1], vid[1:, 1:]
     top = np.concatenate([np.stack([a, d, b], -1)[inside], np.stack([b, d, e], -1)[inside]])
@@ -152,7 +172,11 @@ def main(folder):
     thickness[building] = GROUND + height[building]
 
     inside = clean_outline(owner >= 0)
-    verts, faces = plate_mesh(thickness, inside)
+    bottom = hollow_under(thickness)
+    # the outer rim must reach the bed, or the edge wall would have a gap under it
+    rim = ndimage.binary_dilation(~np.pad(inside, ((0, 1), (0, 1))), iterations=3)
+    bottom[rim] = 0
+    verts, faces = plate_mesh(thickness, inside, bottom)
     assert check_watertight(faces), "plate is not watertight"
     write_stl(DEST / "thin_map.stl", verts, faces)
     vol = volume_cm3(verts, faces)
@@ -165,7 +189,9 @@ def main(folder):
     n = round(60 / GRID)
     cut = np.zeros_like(inside)
     cut[r0:r0 + n, c0:c0 + n] = inside[r0:r0 + n, c0:c0 + n]
-    sv, sf = plate_mesh(thickness, cut)
+    sample_bottom = bottom.copy()
+    sample_bottom[ndimage.binary_dilation(~np.pad(cut, ((0, 1), (0, 1))), iterations=3)] = 0
+    sv, sf = plate_mesh(thickness, cut, sample_bottom)
     assert check_watertight(sf)
     sv[:, 0] -= c0 * GRID
     sv[:, 1] -= (thickness.shape[0] - 1 - r0 - n) * GRID
@@ -183,17 +209,19 @@ def main(folder):
                 f"col = (x + {panel_mm / 2}) / pitch, row = ({panel_mm / 2} - y) / pitch",
     }, indent=2))
 
-    np.save(DEST / "thickness.npy", np.where(np.pad(inside, ((0, 1), (0, 1))), thickness, np.nan))
-    render(thickness, np.pad(inside, ((0, 1), (0, 1))), w_mm, h_mm)
+    covered = np.pad(inside, ((0, 1), (0, 1)))
+    # thickness.npy = how much plastic the light passes through at each point
+    np.save(DEST / "thickness.npy", np.where(covered, thickness - bottom, np.nan))
+    render(thickness, thickness - bottom, covered, w_mm, h_mm)
 
 
-def render(thickness, inside, w_mm, h_mm):
+def render(thickness, plastic, inside, w_mm, h_mm):
     fig, axes = plt.subplots(1, 2, figsize=(20, 10.5), facecolor="white")
     shade = LightSource(315, 45).hillshade(thickness, vert_exag=4, dx=GRID, dy=GRID)
     unlit = np.where(inside, 0.35 + 0.65 * shade, 1.0)
     axes[0].imshow(unlit, cmap="gray", vmin=0, vmax=1, extent=[0, w_mm, 0, h_mm])
     axes[0].set_title("Unlit: white plastic", fontsize=16)
-    glow = np.exp(-thickness / 0.9)                       # thinner plastic = brighter
+    glow = np.exp(-plastic / 0.9)                         # thinner plastic = brighter
     glow = (glow - glow[inside].min()) / np.ptp(glow[inside])
     lit = np.where(inside, glow, np.nan)
     axes[1].set_facecolor("black")
